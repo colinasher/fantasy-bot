@@ -5,6 +5,7 @@ Run with: streamlit run app.py
 
 from datetime import timedelta
 
+import pandas as pd
 import streamlit as st
 
 from draft_sheet import (
@@ -16,7 +17,7 @@ from draft_sheet import (
     match_drafted_player_ids,
 )
 from draft_trends import compute_round_position_shares
-from load_projections import load_offensive_projections
+from load_projections import load_all_projections
 from par_calc import LeagueConfig, compute_par
 from priority_pick import get_priority_pick
 from scoring import score_players
@@ -90,7 +91,7 @@ if load_trends:
 
 @st.cache_data
 def load_data():
-    return load_offensive_projections()
+    return load_all_projections()
 
 
 try:
@@ -169,10 +170,13 @@ def render_board():
         )
 
     with st.expander("Current replacement levels (recalculates as players are drafted)"):
-        if active_positions:
-            rep_cols = st.columns(len(active_positions))
-            for i, pos in enumerate(active_positions):
+        par_positions = [p for p in active_positions if p != "IDP"]
+        if par_positions:
+            rep_cols = st.columns(len(par_positions))
+            for i, pos in enumerate(par_positions):
                 rep_cols[i].metric(pos, f"{replacement_levels.get(pos, 0):.1f} pts")
+        if "IDP" in active_positions:
+            st.caption("IDP is hand-ranked, not PAR-scored - no replacement level shown.")
 
     st.caption(
         f"{len(drafted_cells)} names on the sheet • "
@@ -197,7 +201,10 @@ def render_board():
                 f"text-align:center;color:white;font-weight:bold;'>{pos}</div>",
                 unsafe_allow_html=True,
             )
-            pos_df = pool[pool["position"] == pos].sort_values("par", ascending=False)
+            if pos == "IDP":
+                pos_df = pool[pool["position"] == pos].sort_values("idp_rank", ascending=True)
+            else:
+                pos_df = pool[pool["position"] == pos].sort_values("par", ascending=False)
 
             for _, row in pos_df.head(40).iterrows():
                 is_priority = (
@@ -210,12 +217,18 @@ def render_board():
                     border = "3px solid gold"
                     extra_style = "box-shadow:0 0 8px gold;"
                     star = "⭐ "
+
+                if pos == "IDP":
+                    rank_val = row.get("idp_rank")
+                    detail = f"Rank #{int(rank_val)}" if pd.notna(rank_val) else "Unranked"
+                else:
+                    detail = f"{row['fantasy_points']:.1f} pts • PAR {row['par']:.1f}"
+
                 st.markdown(
                     f"<div style='border-left:{border};padding:4px 8px;margin:3px 0;"
                     f"background-color:rgba(0,0,0,0.03);border-radius:3px;{extra_style}'>"
                     f"<b>{star}{row['name']}</b><br>"
-                    f"<span style='font-size:0.85em;color:gray;'>"
-                    f"{row['fantasy_points']:.1f} pts • PAR {row['par']:.1f}</span></div>",
+                    f"<span style='font-size:0.85em;color:gray;'>{detail}</span></div>",
                     unsafe_allow_html=True,
                 )
 
