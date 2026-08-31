@@ -1,6 +1,6 @@
 """
 Fantasy Draft PAR Dashboard
-Run with:  streamlit run app.py
+Run with: streamlit run app.py
 """
 
 from datetime import timedelta
@@ -9,12 +9,16 @@ import streamlit as st
 
 from draft_sheet import (
     SHEET_URL,
+    TEAM_COLUMNS,
     extract_drafted_cells,
     fetch_sheet_csv,
+    get_team_names,
     match_drafted_player_ids,
 )
+from draft_trends import compute_round_position_shares
 from load_projections import load_offensive_projections
 from par_calc import LeagueConfig, compute_par
+from priority_pick import get_priority_pick
 from scoring import score_players
 
 st.set_page_config(page_title="Draft PAR Board", layout="wide")
@@ -55,7 +59,35 @@ st.sidebar.caption(
     "already on a roster or in the pick grid."
 )
 
+# ---------------- Sidebar: priority pick setup ----------------
+st.sidebar.divider()
+st.sidebar.subheader("Priority Pick")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_team_names():
+    try:
+        return get_team_names()
+    except RuntimeError as e:
+        st.sidebar.error(str(e))
+        return []
+
+
+team_names = cached_team_names()
+if team_names:
+    my_team = st.sidebar.selectbox("Your team", team_names)
+    my_team_index = team_names.index(my_team)
+else:
+    my_team_index = None
+    st.sidebar.warning("Couldn't read team names from the sheet header row.")
+
+load_trends = st.sidebar.button("Load historical draft trends")
+if load_trends:
+    st.session_state.pop("historical_shares", None)  # force recompute below
+
 # ---------------- Load projections (local CSVs) ----------------
+
+
 @st.cache_data
 def load_data():
     return load_offensive_projections()
@@ -79,6 +111,17 @@ if "player_id" not in scored_df.columns:
         scored_df["name"].astype(str) + "_" + scored_df["position"].astype(str)
     )
 
+# ---------------- Historical draft trends (computed once, cached in session) ----------------
+if "historical_shares" not in st.session_state:
+    with st.spinner("Reading historical draft tabs (PLAYERS + past years)..."):
+        try:
+            st.session_state["historical_shares"] = compute_round_position_shares(scored_df)
+        except RuntimeError as e:
+            st.sidebar.error(f"Couldn't load historical trends: {e}")
+            st.session_state["historical_shares"] = None
+
+historical_shares = st.session_state.get("historical_shares")
+
 
 @st.fragment(run_every=timedelta(seconds=15))
 def render_board():
@@ -88,13 +131,42 @@ def render_board():
         drafted_ids, unmatched = match_drafted_player_ids(scored_df, drafted_cells)
     except RuntimeError as e:
         st.error(str(e))
-        drafted_ids, unmatched, drafted_cells = set(), [], []
+        drafted_ids, unmatched, drafted_cells, csv_text = set(), [], [], ""
 
     pool = scored_df[~scored_df["player_id"].isin(drafted_ids)]
     pool, replacement_levels = compute_par(pool, cfg)
+
     active_positions = [p for p in POSITIONS if p in pool["position"].values]
 
     st.title("🏈 Draft Board — Points Above Replacement")
+
+    # ---------------- Priority pick banner ----------------
+    priority = None
+    if historical_shares is not None and my_team_index is not None and csv_text:
+        priority = get_priority_pick(
+            pool, csv_text, historical_shares, teams, my_team_index
+        )
+
+    if priority:
+        color = COLORS.get(priority["position"], "#333")
+        st.markdown(
+            f"<div style='background-color:{color}22;border:2px solid {color};"
+            f"border-radius:10px;padding:14px 18px;margin-bottom:12px;'>"
+            f"<div style='font-size:1.1em;font-weight:bold;color:{color};'>"
+            f"⭐ Priority Pick: {priority['player']} ({priority['position']})</div>"
+            f"<div style='margin-top:4px;'>{priority['reason']}</div>"
+            f"<div style='margin-top:4px;font-size:0.85em;color:gray;'>"
+            f"{priority['picks_until_next_turn']} picks until your next turn</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    elif my_team_index is None:
+        st.info("Select your team in the sidebar to enable the priority pick recommendation.")
+    elif historical_shares is None:
+        st.info(
+            "Historical draft trends aren't loaded yet — click "
+            "'Load historical draft trends' in the sidebar."
+        )
 
     with st.expander("Current replacement levels (recalculates as players are drafted)"):
         if active_positions:
@@ -107,11 +179,16 @@ def render_board():
         f"{len(drafted_ids)} matched to projections • "
         f"{len(pool)} remaining • auto-refreshes every 15s"
     )
+
     if unmatched:
         with st.expander(f"{len(unmatched)} sheet names not in projections (IDP / mismatches)"):
             st.write(", ".join(unmatched))
 
     cols = st.columns(len(active_positions) or 1)
+
+    priority_player = priority["player"] if priority else None
+    priority_position = priority["position"] if priority else None
+
     for i, pos in enumerate(active_positions):
         color = COLORS[pos]
         with cols[i]:
@@ -121,11 +198,22 @@ def render_board():
                 unsafe_allow_html=True,
             )
             pos_df = pool[pool["position"] == pos].sort_values("par", ascending=False)
+
             for _, row in pos_df.head(40).iterrows():
+                is_priority = (
+                    pos == priority_position and row["name"] == priority_player
+                )
+                border = f"4px solid {color}"
+                extra_style = ""
+                star = ""
+                if is_priority:
+                    border = "3px solid gold"
+                    extra_style = "box-shadow:0 0 8px gold;"
+                    star = "⭐ "
                 st.markdown(
-                    f"<div style='border-left:4px solid {color};padding:4px 8px;margin:3px 0;"
-                    f"background-color:rgba(0,0,0,0.03);border-radius:3px;'>"
-                    f"<b>{row['name']}</b><br>"
+                    f"<div style='border-left:{border};padding:4px 8px;margin:3px 0;"
+                    f"background-color:rgba(0,0,0,0.03);border-radius:3px;{extra_style}'>"
+                    f"<b>{star}{row['name']}</b><br>"
                     f"<span style='font-size:0.85em;color:gray;'>"
                     f"{row['fantasy_points']:.1f} pts • PAR {row['par']:.1f}</span></div>",
                     unsafe_allow_html=True,

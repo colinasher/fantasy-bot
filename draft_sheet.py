@@ -28,7 +28,11 @@ TEAM_COLUMNS = 10
 PLAYER_CELL = re.compile(
     r"^[A-Za-z]\.\s+.+\([A-Za-z]{2,3}\)$"
 )
+
 SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v"}
+
+# Matches row labels like "Round 1", "Round 12" in the pick-grid tabs.
+ROUND_RE = re.compile(r"^Round\s+(\d+)$", re.I)
 
 
 def fetch_sheet_csv(sheet_name: str = SHEET_NAME) -> str:
@@ -78,7 +82,6 @@ def _abbrev_forms(name: str) -> set[str]:
     parts = [p for p in (name or "").split() if p]
     if len(parts) < 2 or not parts[0]:
         return set()
-
     initial = parts[0][0].upper()
     rest = parts[1:]
     forms = {
@@ -95,7 +98,6 @@ def _abbrev_forms(name: str) -> set[str]:
 def board_keys_for_player(name: str, team: str) -> set[str]:
     """
     Keys a projection player might appear as on the draft board.
-
     "Ja'Marr Chase" / CIN -> "J. Chase (CIN)"
     "Aaron Jones Sr." / MIN -> "A. Jones Sr. (MIN)" and "A. Jones (MIN)"
     """
@@ -124,6 +126,7 @@ def match_drafted_player_ids(scored_df, cells: list[str]) -> tuple[set[str], lis
     """
     exact: dict[str, str] = {}
     by_abbrev: dict[str, list[str]] = {}
+
     for _, row in scored_df.iterrows():
         pid = row["player_id"]
         keys = board_keys_for_player(str(row["name"]), str(row.get("team", "")))
@@ -151,7 +154,6 @@ def match_drafted_player_ids(scored_df, cells: list[str]) -> tuple[set[str], lis
             name_cf,
             stripped,
         ]
-
         pid = None
         for cand in candidates:
             if cand in exact:
@@ -164,10 +166,67 @@ def match_drafted_player_ids(scored_df, cells: list[str]) -> tuple[set[str], lis
                 if len(unique) == 1:
                     pid = unique[0]
                     break
-
         if pid is None:
             unmatched.append(cell)
         else:
             matched_ids.add(pid)
 
     return matched_ids, unmatched
+
+
+# ---------------------------------------------------------------------------
+# New: round-grid parsing, used by both draft_trends.py (historical tabs)
+# and priority_pick.py (live current-round detection on the "2026" tab).
+# ---------------------------------------------------------------------------
+
+def parse_round_picks(csv_text: str) -> dict[int, list[str]]:
+    """Round number -> ordered list of FILLED pick-grid cells (left to right)."""
+    by_round: dict[int, list[str]] = {}
+    for row in csv.reader(io.StringIO(csv_text)):
+        if not row:
+            continue
+        m = ROUND_RE.match((row[0] or "").strip())
+        if not m:
+            continue
+        rnd = int(m.group(1))
+        picks = []
+        for cell in row[1 : 1 + TEAM_COLUMNS]:
+            text = (cell or "").strip()
+            if PLAYER_CELL.match(text):
+                picks.append(text)
+        by_round[rnd] = picks
+    return by_round
+
+
+def parse_round_cells(csv_text: str) -> dict[int, list[str]]:
+    """
+    Round number -> raw cells for all TEAM_COLUMNS, in column order,
+    preserving empty strings for not-yet-made picks. Needed to know
+    exactly which team-column slots are still open in an in-progress
+    round (parse_round_picks only returns the filled ones, losing
+    position information).
+    """
+    by_round: dict[int, list[str]] = {}
+    for row in csv.reader(io.StringIO(csv_text)):
+        if not row:
+            continue
+        m = ROUND_RE.match((row[0] or "").strip())
+        if not m:
+            continue
+        rnd = int(m.group(1))
+        cells = [(c or "").strip() for c in row[1 : 1 + TEAM_COLUMNS]]
+        by_round[rnd] = cells
+    return by_round
+
+
+def get_team_names(sheet_name: str = SHEET_NAME) -> list[str]:
+    """
+    First row of the tab = the 10 team-column headers, in column order.
+    Used to let the user pick 'which column is my team' for the priority
+    pick's snake-order lookahead.
+    """
+    csv_text = fetch_sheet_csv(sheet_name)
+    reader = csv.reader(io.StringIO(csv_text))
+    header = next(reader, [])
+    names = [(c or "").strip() for c in header[1 : 1 + TEAM_COLUMNS]]
+    return names
