@@ -8,13 +8,16 @@ from datetime import timedelta
 import pandas as pd
 import streamlit as st
 
+from bye_weeks import bye_week_for_team
 from draft_sheet import (
     SHEET_URL,
     TEAM_COLUMNS,
+    ROSTER_SLOTS,
     extract_drafted_cells,
     fetch_sheet_csv,
     get_team_names,
     match_drafted_player_ids,
+    parse_roster_rows,
 )
 from draft_trends import compute_round_position_shares
 from load_projections import load_all_projections
@@ -33,60 +36,20 @@ COLORS = {
     "IDP": "#7b2cbf",
 }
 
-# ---------------- Sidebar: league settings ----------------
-st.sidebar.header("League Settings")
-teams = st.sidebar.number_input("Teams", value=10, min_value=2, max_value=20)
-qb_slots = st.sidebar.number_input("QB slots/team", value=2, min_value=0)
-rb_slots = st.sidebar.number_input("RB slots/team", value=2, min_value=0)
-wr_slots = st.sidebar.number_input("WR slots/team", value=3, min_value=0)
-te_slots = st.sidebar.number_input("TE slots/team", value=1, min_value=0)
-flex_slots = st.sidebar.number_input("FLEX slots/team", value=1, min_value=0)
-idp_slots = st.sidebar.number_input("IDP slots/team", value=3, min_value=0)
-
+# ---------------- League settings (fixed - not changing mid-draft) ----------------
 cfg = LeagueConfig(
-    teams=teams,
-    qb_slots=qb_slots,
-    rb_slots=rb_slots,
-    wr_slots=wr_slots,
-    te_slots=te_slots,
-    flex_slots=flex_slots,
-    idp_slots=idp_slots,
+    teams=10,
+    qb_slots=2,
+    rb_slots=2,
+    wr_slots=3,
+    te_slots=1,
+    flex_slots=1,
+    idp_slots=3,
 )
+teams = cfg.teams
 
-st.sidebar.divider()
-st.sidebar.markdown(f"[Open live draft sheet]({SHEET_URL})")
-st.sidebar.caption(
-    "Board polls the 2026 tab every 15 seconds and hides anyone "
-    "already on a roster or in the pick grid."
-)
-
-# ---------------- Sidebar: priority pick setup ----------------
-st.sidebar.divider()
-st.sidebar.subheader("Priority Pick")
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_team_names():
-    try:
-        return get_team_names()
-    except RuntimeError as e:
-        st.sidebar.error(str(e))
-        return []
-
-
-team_names = cached_team_names()
-if team_names:
-    my_team = st.sidebar.selectbox("Your team", team_names)
-    my_team_index = team_names.index(my_team)
-else:
-    my_team_index = None
-    st.sidebar.warning("Couldn't read team names from the sheet header row.")
-
-load_trends = st.sidebar.button("Load historical draft trends")
-if load_trends:
-    st.session_state.pop("historical_shares", None)  # force recompute below
-
-# ---------------- Load projections (local CSVs) ----------------
+# ---------------- Load projections (local CSVs) - moved up so the roster ----------------
+# ---------------- section below can use scored_df right away ----------------
 
 
 @st.cache_data
@@ -111,6 +74,116 @@ if "player_id" not in scored_df.columns:
     scored_df["player_id"] = (
         scored_df["name"].astype(str) + "_" + scored_df["position"].astype(str)
     )
+
+# ---------------- Sidebar: team selector (needed for the roster below) ----------------
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_team_names():
+    try:
+        return get_team_names()
+    except RuntimeError as e:
+        st.sidebar.error(str(e))
+        return []
+
+
+team_names = cached_team_names()
+if team_names:
+    my_team = st.sidebar.selectbox("Your team", team_names)
+    my_team_index = team_names.index(my_team)
+else:
+    my_team_index = None
+    st.sidebar.warning("Couldn't read team names from the sheet header row.")
+
+
+# ---------------- Sidebar: current roster (top of sidebar) ----------------
+@st.fragment(run_every=timedelta(seconds=15))
+def render_roster_sidebar():
+    with st.sidebar:
+        st.header("Current Roster")
+
+        if my_team_index is None:
+            st.caption("Select your team above to see your roster.")
+            return
+
+        try:
+            csv_text = fetch_sheet_csv()
+        except RuntimeError as e:
+            st.caption(f"Couldn't read the sheet: {e}")
+            return
+
+        roster_by_slot = parse_roster_rows(csv_text)
+        for slot in ROSTER_SLOTS:
+            cell = ""
+            if slot in roster_by_slot and my_team_index < len(roster_by_slot[slot]):
+                cell = roster_by_slot[slot][my_team_index]
+
+            if not cell:
+                st.markdown(
+                    "<div style='border-left:4px dashed #555;padding:4px 8px;"
+                    "margin:3px 0;border-radius:3px;color:#888;'>"
+                    f"<b>{slot}</b><br>"
+                    "<span style='font-size:0.85em;'>Empty</span></div>",
+                    unsafe_allow_html=True,
+                )
+                continue
+
+            match_ids, _ = match_drafted_player_ids(scored_df, [cell])
+            row = None
+            if match_ids:
+                pid = next(iter(match_ids))
+                matched = scored_df[scored_df["player_id"] == pid]
+                if len(matched):
+                    row = matched.iloc[0]
+
+            if row is None:
+                st.markdown(
+                    "<div style='border-left:4px solid #555;padding:4px 8px;"
+                    "margin:3px 0;background-color:rgba(0,0,0,0.03);"
+                    "border-radius:3px;'>"
+                    f"<b>{slot}</b><br>"
+                    f"<span style='font-size:0.85em;color:gray;'>{cell}</span></div>",
+                    unsafe_allow_html=True,
+                )
+                continue
+
+            color = COLORS.get(row["position"], "#555")
+            if row["position"] == "IDP":
+                rank_val = row.get("idp_rank")
+                detail = f"Rank #{int(rank_val)}" if pd.notna(rank_val) else "Unranked"
+            else:
+                detail = f"{row['fantasy_points']:.1f} pts"
+
+            bye = bye_week_for_team(row.get("team"))
+            if bye is not None:
+                detail += f" • Bye: {bye}"
+
+            st.markdown(
+                f"<div style='border-left:4px solid {color};padding:4px 8px;"
+                f"margin:3px 0;background-color:rgba(0,0,0,0.03);"
+                f"border-radius:3px;'>"
+                f"<b>{slot}: {row['name']}</b><br>"
+                f"<span style='font-size:0.85em;color:gray;'>{detail}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+
+render_roster_sidebar()
+
+# ---------------- Sidebar: link + priority pick setup (below the roster) ----------------
+st.sidebar.divider()
+st.sidebar.markdown(f"[Open live draft sheet]({SHEET_URL})")
+st.sidebar.caption(
+    "Board polls the 2026 tab every 15 seconds and hides anyone "
+    "already on a roster or in the pick grid."
+)
+
+st.sidebar.divider()
+st.sidebar.subheader("Priority Pick")
+
+load_trends = st.sidebar.button("Load historical draft trends")
+if load_trends:
+    st.session_state.pop("historical_shares", None)  # force recompute below
 
 # ---------------- Historical draft trends (computed once, cached in session) ----------------
 if "historical_shares" not in st.session_state:
@@ -223,6 +296,10 @@ def render_board():
                     detail = f"Rank #{int(rank_val)}" if pd.notna(rank_val) else "Unranked"
                 else:
                     detail = f"{row['fantasy_points']:.1f} pts • PAR {row['par']:.1f}"
+
+                bye = bye_week_for_team(row.get("team"))
+                if bye is not None:
+                    detail += f" • Bye: {bye}"
 
                 st.markdown(
                     f"<div style='border-left:{border};padding:4px 8px;margin:3px 0;"

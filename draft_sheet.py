@@ -230,3 +230,37 @@ def get_team_names(sheet_name: str = SHEET_NAME) -> list[str]:
     header = next(reader, [])
     names = [(c or "").strip() for c in header[1 : 1 + TEAM_COLUMNS]]
     return names
+
+# ---------------------------------------------------------------------------
+# Roster section: the sheet has a labeled row per slot (QB1, QB2, ..., BN8)
+# below the pick grid, one column per team - same TEAM_COLUMNS layout.
+# ---------------------------------------------------------------------------
+
+ROSTER_SLOTS = [
+    "QB1", "QB2",
+    "RB1", "RB2",
+    "WR1", "WR2", "WR3",
+    "TE1",
+    "FLEX",
+    "IDP1", "IDP2", "IDP3",
+    "BN1", "BN2", "BN3", "BN4", "BN5", "BN6", "BN7", "BN8",
+]
+
+
+def parse_roster_rows(csv_text: str) -> dict[str, list[str]]:
+    """
+    Slot label ('QB1', 'FLEX', 'BN3', ...) -> raw cells for all
+    TEAM_COLUMNS, in column order. Only the first matching row per label
+    is kept (in case a label string appears more than once anywhere else
+    in the sheet).
+    """
+    wanted = {s.upper() for s in ROSTER_SLOTS}
+    by_slot: dict[str, list[str]] = {}
+    for row in csv.reader(io.StringIO(csv_text)):
+        if not row:
+            continue
+        label = (row[0] or "").strip().upper()
+        if label in wanted and label not in by_slot:
+            cells = [(c or "").strip() for c in row[1 : 1 + TEAM_COLUMNS]]
+            by_slot[label] = cells
+    return by_slot
