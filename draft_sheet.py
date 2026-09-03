@@ -20,6 +20,7 @@ SHEET_URL = (
     f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
     f"#gid=290495943"
 )
+TRADES_SHEET_NAME = "Trades 2026"
 
 # First 10 data columns after the row label are the 10 teams.
 # Everything to the right is pick-trade / extension metadata.

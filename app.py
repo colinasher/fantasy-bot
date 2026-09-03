@@ -13,6 +13,7 @@ from draft_sheet import (
     SHEET_URL,
     TEAM_COLUMNS,
     ROSTER_SLOTS,
+    TRADES_SHEET_NAME,
     extract_drafted_cells,
     fetch_sheet_csv,
     get_team_names,
@@ -21,7 +22,7 @@ from draft_sheet import (
 )
 from draft_trends import compute_round_position_shares
 from load_projections import load_all_projections
-from par_calc import LeagueConfig, compute_par
+from par_calc import LeagueConfig, apply_fixed_par, compute_replacement_levels
 from priority_pick import get_priority_pick
 from scoring import score_players
 
@@ -74,6 +75,16 @@ if "player_id" not in scored_df.columns:
     scored_df["player_id"] = (
         scored_df["name"].astype(str) + "_" + scored_df["position"].astype(str)
     )
+
+# ---------------- Fixed replacement-level baseline (computed once) ----------------
+# Replacement level (e.g. "21st best QB") is anchored to the FULL initial
+# player pool and held fixed for the entire draft, so it doesn't drift as
+# players get drafted - only which players still appear in the board
+# changes, not the yardstick PAR is measured against.
+if "fixed_replacement_levels" not in st.session_state:
+    st.session_state["fixed_replacement_levels"] = compute_replacement_levels(scored_df, cfg)
+
+fixed_replacement_levels = st.session_state["fixed_replacement_levels"]
 
 # ---------------- Sidebar: your team (hardcoded - not selectable) ----------------
 
@@ -216,7 +227,7 @@ def render_board():
         drafted_ids, unmatched, drafted_cells, csv_text = set(), [], [], ""
 
     pool = scored_df[~scored_df["player_id"].isin(drafted_ids)]
-    pool, replacement_levels = compute_par(pool, cfg)
+    pool = apply_fixed_par(pool, fixed_replacement_levels)
 
     active_positions = [p for p in POSITIONS if p in pool["position"].values]
 
@@ -226,7 +237,7 @@ def render_board():
     priority = None
     if historical_shares is not None and my_team_index is not None and csv_text:
         try:
-            trades_csv_text = fetch_sheet_csv("Trades 2026")
+            trades_csv_text = fetch_sheet_csv(TRADES_SHEET_NAME)
         except RuntimeError:
             trades_csv_text = None  # falls back to snake-order estimate
 
@@ -256,12 +267,12 @@ def render_board():
             "'Load historical draft trends' in the sidebar."
         )
 
-    with st.expander("Current replacement levels (recalculates as players are drafted)"):
+    with st.expander("Replacement level baseline (fixed at draft start, doesn't change)"):
         par_positions = [p for p in active_positions if p != "IDP"]
         if par_positions:
             rep_cols = st.columns(len(par_positions))
             for i, pos in enumerate(par_positions):
-                rep_cols[i].metric(pos, f"{replacement_levels.get(pos, 0):.1f} pts")
+                rep_cols[i].metric(pos, f"{fixed_replacement_levels.get(pos, 0):.1f} pts")
         if "IDP" in active_positions:
             st.caption("IDP is hand-ranked, not PAR-scored - no replacement level shown.")
 

@@ -1,7 +1,7 @@
 """
 par_calc.py
 Computes replacement level and Points Above Replacement (PAR) for each
-position, given the current pool of UNDRAFTED players.
+position.
 
 Replacement level = fantasy points of the first player at a position who
 would NOT be a starter anywhere in the league, given:
@@ -9,9 +9,13 @@ would NOT be a starter anywhere in the league, given:
   - a shared FLEX pool (RB/WR/TE compete for FLEX_SLOTS spots)
   - IDP is a single generic pool (LB-heavy scoring already baked into points)
 
-This recalculates from whatever players remain in the pool, so as players
-get drafted, replacement levels (and therefore everyone's PAR) shift
-automatically.
+Replacement level is meant to be computed ONCE from the full initial
+player pool (before any draft picks happen) and then held fixed for the
+rest of the draft - see apply_fixed_par. Recomputing it from the
+shrinking undrafted pool would make "replacement level" drift as players
+get drafted (e.g. the "21st best QB" baseline would silently become the
+21st best QB *remaining*, not the original 21st), which isn't what
+replacement level is supposed to mean.
 """
 
 import pandas as pd
@@ -132,11 +136,26 @@ def _nth_points(sorted_df: pd.DataFrame, n: int) -> float:
 def compute_par(pool: pd.DataFrame, cfg: LeagueConfig) -> pd.DataFrame:
     """
     Adds 'replacement_points' and 'par' columns to the pool of undrafted
-    players, based on current replacement levels.
+    players, recalculating replacement level from THIS pool. Kept for
+    convenience/testing, but app.py should prefer apply_fixed_par so
+    replacement level (and therefore PAR) stays anchored to the original
+    full player pool rather than drifting as players get drafted.
     """
     pool = pool.copy()
     replacement_levels = compute_replacement_levels(pool, cfg)
+    return apply_fixed_par(pool, replacement_levels), replacement_levels
 
-    pool["replacement_points"] = pool["position"].map(replacement_levels)
+
+def apply_fixed_par(pool: pd.DataFrame, fixed_replacement_levels: dict) -> pd.DataFrame:
+    """
+    Adds 'replacement_points' and 'par' columns using a FIXED replacement
+    baseline (computed once, typically from the full initial pool before
+    any picks are made) rather than recalculating it from `pool`. This
+    keeps each remaining player's PAR anchored to the original "21st
+    best QB" style baseline all draft long - only which players still
+    appear changes, not the yardstick they're measured against.
+    """
+    pool = pool.copy()
+    pool["replacement_points"] = pool["position"].map(fixed_replacement_levels)
     pool["par"] = (pool["fantasy_points"] - pool["replacement_points"]).round(2)
-    return pool, replacement_levels
+    return pool
