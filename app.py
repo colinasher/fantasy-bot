@@ -75,7 +75,9 @@ if "player_id" not in scored_df.columns:
         scored_df["name"].astype(str) + "_" + scored_df["position"].astype(str)
     )
 
-# ---------------- Sidebar: team selector (needed for the roster below) ----------------
+# ---------------- Sidebar: your team (hardcoded - not selectable) ----------------
+
+MY_TEAM_NAME = "4. Buck Yag and Colin"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -88,9 +90,15 @@ def cached_team_names():
 
 
 team_names = cached_team_names()
-if team_names:
-    my_team = st.sidebar.selectbox("Your team", team_names)
-    my_team_index = team_names.index(my_team)
+my_team = MY_TEAM_NAME
+if team_names and MY_TEAM_NAME in team_names:
+    my_team_index = team_names.index(MY_TEAM_NAME)
+elif team_names:
+    my_team_index = None
+    st.sidebar.error(
+        f"'{MY_TEAM_NAME}' not found in the sheet's team header row. "
+        f"Found: {', '.join(team_names)}"
+    )
 else:
     my_team_index = None
     st.sidebar.warning("Couldn't read team names from the sheet header row.")
@@ -217,8 +225,14 @@ def render_board():
     # ---------------- Priority pick banner ----------------
     priority = None
     if historical_shares is not None and my_team_index is not None and csv_text:
+        try:
+            trades_csv_text = fetch_sheet_csv("Trades 2026")
+        except RuntimeError:
+            trades_csv_text = None  # falls back to snake-order estimate
+
         priority = get_priority_pick(
-            pool, csv_text, historical_shares, teams, my_team_index
+            pool, csv_text, trades_csv_text, historical_shares,
+            teams, my_team_index, my_team,
         )
 
     if priority:

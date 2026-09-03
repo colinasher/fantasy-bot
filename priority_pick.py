@@ -6,10 +6,14 @@ the position where waiting is riskiest given how fast that position
 historically disappears before your next turn.
 
 Logic:
-  1. Figure out the current round and which team-columns still need to
-     pick this round (from the live sheet's "Round N" grid).
-  2. Simulate the snake order forward from there to find exactly how many
-     picks happen - and in which rounds - before your team picks again.
+  1. Read the authoritative pick order from the "Trades 2026" tab - this
+     already reflects any traded picks, so no snake-order guessing is
+     needed for anything it covers. Count how many picks have actually
+     happened (from the live "2026" grid) to find where "now" is in that
+     ordered list, then walk forward to find your next pick and every
+     pick in between.
+  2. If the Trades tab is unavailable entirely, fall back to a plain
+     snake-order simulation (accurate only in the absence of trades).
   3. For each position, sum the historical round-shares over those
      upcoming picks -> "expected # of this position drafted before your
      next turn".
@@ -23,8 +27,51 @@ Logic:
 
 from __future__ import annotations
 
-from draft_sheet import parse_round_cells
+from draft_sheet import parse_pick_order_tab, parse_round_cells, parse_round_picks
 from draft_trends import POSITIONS, share_for_round
+
+# IDP has no stat-based PAR (hand-rank only), so it never competes for
+# the priority-pick recommendation - just QB/RB/WR/TE.
+RANKED_POSITIONS = [p for p in POSITIONS if p != "IDP"]
+
+
+# ---------------------------------------------------------------------------
+# Primary: authoritative, trade-adjusted pick order (from the Trades tab)
+# ---------------------------------------------------------------------------
+
+
+def picks_until_my_turn_from_order(
+    pick_order: list[tuple[int, str]],
+    picks_completed: int,
+    my_team_name: str,
+    max_lookahead_picks: int = 80,
+) -> list[int] | None:
+    """
+    Walks the authoritative pick order starting at the next undrafted
+    pick. Returns the ROUND NUMBER of each pick before my team's next
+    one - or None if my team was never found (the tab doesn't cover far
+    enough ahead), so the caller can decide whether to fall back.
+    """
+    upcoming_rounds: list[int] = []
+    idx = picks_completed
+    steps = 0
+
+    while idx < len(pick_order) and steps < max_lookahead_picks:
+        rnd, team = pick_order[idx]
+        if team == my_team_name:
+            return upcoming_rounds
+        upcoming_rounds.append(rnd)
+        idx += 1
+        steps += 1
+
+    return None  # ran out of authoritative data before finding my team
+
+
+# ---------------------------------------------------------------------------
+# Fallback: plain snake simulation, used only if the Trades tab is
+# unavailable or doesn't cover far enough ahead. Accurate only when no
+# trades affect the picks it's simulating.
+# ---------------------------------------------------------------------------
 
 
 def snake_order(round_num: int, teams: int) -> list[int]:
@@ -46,23 +93,17 @@ def find_current_round(round_cells: dict[int, list[str]], teams: int) -> tuple[i
         filled = [bool(c) for c in cells[:teams]]
         if not all(filled):
             return rnd, filled
-    # Every round present in the sheet is full - draft is ahead of what
-    # we parsed (or hasn't started, in which case round_cells is empty).
     next_round = max(round_cells.keys(), default=0) + 1
     return next_round, [False] * teams
 
 
-def picks_until_my_turn(
+def picks_until_my_turn_snake(
     round_cells: dict[int, list[str]],
     teams: int,
     my_team_index: int,
     max_lookahead_rounds: int = 6,
 ) -> list[int]:
-    """
-    Returns the ROUND NUMBER of each pick that happens strictly before
-    my team's next pick, in chronological snake order. Length of the
-    list = number of picks until my turn.
-    """
+    """Standard snake-order lookahead - does NOT account for traded picks."""
     current_round, filled = find_current_round(round_cells, teams)
     upcoming_rounds: list[int] = []
 
@@ -78,8 +119,13 @@ def picks_until_my_turn(
                 return upcoming_rounds
             upcoming_rounds.append(rnd)
         rnd += 1
-        flags = [False] * teams  # future rounds: nothing filled yet
+        flags = [False] * teams
     return upcoming_rounds
+
+
+# ---------------------------------------------------------------------------
+# Priority score computation (unchanged logic, just fed better input now)
+# ---------------------------------------------------------------------------
 
 
 def compute_priority_pick(pool_with_par, shares_by_round: dict, upcoming_rounds: list[int]):
@@ -87,7 +133,7 @@ def compute_priority_pick(pool_with_par, shares_by_round: dict, upcoming_rounds:
     pool_with_par: DataFrame with 'position', 'name', 'par' columns
                    (the current undrafted pool, already PAR-scored).
     shares_by_round: output of draft_trends.compute_round_position_shares
-    upcoming_rounds: output of picks_until_my_turn
+    upcoming_rounds: rounds of each pick before your next turn
 
     Returns None if the pool is empty, else a dict with the recommended
     position/player, the reasoning string, and the full per-position
@@ -96,7 +142,7 @@ def compute_priority_pick(pool_with_par, shares_by_round: dict, upcoming_rounds:
     K = len(upcoming_rounds)
     breakdown = {}
 
-    for pos in POSITIONS:
+    for pos in RANKED_POSITIONS:
         pos_pool = (
             pool_with_par[pool_with_par["position"] == pos]
             .sort_values("par", ascending=False)
@@ -159,18 +205,35 @@ def compute_priority_pick(pool_with_par, shares_by_round: dict, upcoming_rounds:
 def get_priority_pick(
     scored_pool_with_par,
     current_year_csv_text: str,
+    trades_csv_text: str | None,
     shares_by_round: dict,
     teams: int,
     my_team_index: int | None,
+    my_team_name: str | None,
 ):
     """
-    Convenience wrapper: parses the live '2026' tab csv already fetched
-    by app.py (no extra network call), runs the snake-order lookahead,
-    and returns the priority pick recommendation - or None if we don't
-    have enough info (e.g. no team selected yet).
+    Convenience wrapper: figures out how many picks stand between now and
+    your next turn (trade-aware if the Trades tab is readable, else a
+    plain snake-order estimate), and returns the priority pick
+    recommendation - or None if we don't have enough info yet.
     """
-    if my_team_index is None:
+    if my_team_index is None or my_team_name is None:
         return None
-    round_cells = parse_round_cells(current_year_csv_text)
-    upcoming_rounds = picks_until_my_turn(round_cells, teams, my_team_index)
+
+    round_picks = parse_round_picks(current_year_csv_text)
+    picks_completed = sum(len(cells) for cells in round_picks.values())
+
+    pick_order = parse_pick_order_tab(trades_csv_text) if trades_csv_text else []
+
+    upcoming_rounds = None
+    if pick_order:
+        upcoming_rounds = picks_until_my_turn_from_order(
+            pick_order, picks_completed, my_team_name
+        )
+
+    if upcoming_rounds is None:
+        # Trades tab unavailable, empty, or didn't cover far enough ahead.
+        round_cells = parse_round_cells(current_year_csv_text)
+        upcoming_rounds = picks_until_my_turn_snake(round_cells, teams, my_team_index)
+
     return compute_priority_pick(scored_pool_with_par, shares_by_round, upcoming_rounds)

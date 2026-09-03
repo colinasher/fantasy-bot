@@ -264,3 +264,35 @@ def parse_roster_rows(csv_text: str) -> dict[str, list[str]]:
             cells = [(c or "").strip() for c in row[1 : 1 + TEAM_COLUMNS]]
             by_slot[label] = cells
     return by_slot
+
+# ---------------------------------------------------------------------------
+# Trades tab: a "Pick" / "Team" table (columns B, C) that already reflects
+# any traded picks - this is the authoritative, trade-adjusted draft order,
+# so it's read directly instead of trying to simulate snake order + trades.
+# ---------------------------------------------------------------------------
+
+TRADES_SHEET_NAME = "Trades 2026"
+
+PICK_LABEL_RE = re.compile(r"^(\d+)\.(\d+)$")
+
+
+def parse_pick_order_tab(csv_text: str) -> list[tuple[int, str]]:
+    """
+    Returns [(round, team_name), ...] in true overall pick order (index 0
+    = pick 1). Reads whichever rows are actually present - no round limit
+    assumed, since the tab may not be filled out beyond the picks made
+    (or planned) so far.
+    """
+    entries: dict[tuple[int, int], str] = {}
+    for row in csv.reader(io.StringIO(csv_text)):
+        if len(row) < 3:
+            continue
+        label = (row[1] or "").strip()
+        team = (row[2] or "").strip()
+        m = PICK_LABEL_RE.match(label)
+        if m and team:
+            rnd, pos = int(m.group(1)), int(m.group(2))
+            entries[(rnd, pos)] = team
+
+    ordered_keys = sorted(entries.keys())
+    return [(rnd, entries[(rnd, pos)]) for rnd, pos in ordered_keys]
