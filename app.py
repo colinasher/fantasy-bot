@@ -233,7 +233,7 @@ def render_board():
 
     st.title("🏈 Draft Board — Points Above Replacement")
 
-    # ---------------- Priority pick banner ----------------
+    # ---------------- Priority pick banner (gold/silver/bronze, collapsible) ----------------
     priority = None
     if historical_shares is not None and my_team_index is not None and csv_text:
         try:
@@ -246,19 +246,31 @@ def render_board():
             teams, my_team_index, my_team,
         )
 
+    MEDAL_STYLES = {
+        1: {"emoji": "🥇", "color": "#d4af37", "label": "Priority Pick"},
+        2: {"emoji": "🥈", "color": "#a8a8a8", "label": "2nd Best"},
+        3: {"emoji": "🥉", "color": "#b08d57", "label": "3rd Best"},
+    }
+
     if priority:
-        color = COLORS.get(priority["position"], "#333")
-        st.markdown(
-            f"<div style='background-color:{color}22;border:2px solid {color};"
-            f"border-radius:10px;padding:14px 18px;margin-bottom:12px;'>"
-            f"<div style='font-size:1.1em;font-weight:bold;color:{color};'>"
-            f"⭐ Priority Pick: {priority['player']} ({priority['position']})</div>"
-            f"<div style='margin-top:4px;'>{priority['reason']}</div>"
-            f"<div style='margin-top:4px;font-size:0.85em;color:gray;'>"
-            f"{priority['picks_until_next_turn']} picks until your next turn</div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        header = f"🥇 Priority Pick: {priority['player']} ({priority['position']})"
+        with st.expander(header, expanded=True):
+            for rec in priority["ranked"]:
+                medal = MEDAL_STYLES.get(rec["rank"])
+                if medal is None:
+                    continue
+                st.markdown(
+                    f"<div style='background-color:{medal['color']}22;"
+                    f"border:2px solid {medal['color']};border-radius:10px;"
+                    f"padding:12px 18px;margin-bottom:8px;'>"
+                    f"<div style='font-size:1.05em;font-weight:bold;color:{medal['color']};'>"
+                    f"{medal['emoji']} {medal['label']}: {rec['player']} ({rec['position']})</div>"
+                    f"<div style='margin-top:4px;'>{rec['reason']}</div>"
+                    f"<div style='margin-top:4px;font-size:0.85em;color:gray;'>"
+                    f"{rec['picks_until_next_turn']} picks until your next turn</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
     elif my_team_index is None:
         st.info("Select your team in the sidebar to enable the priority pick recommendation.")
     elif historical_shares is None:
@@ -288,8 +300,10 @@ def render_board():
 
     cols = st.columns(len(active_positions) or 1)
 
-    priority_player = priority["player"] if priority else None
-    priority_position = priority["position"] if priority else None
+    medal_lookup = {}  # (position, player_name) -> rank (1/2/3)
+    if priority:
+        for rec in priority["ranked"]:
+            medal_lookup[(rec["position"], rec["player"])] = rec["rank"]
 
     for i, pos in enumerate(active_positions):
         color = COLORS[pos]
@@ -305,16 +319,22 @@ def render_board():
                 pos_df = pool[pool["position"] == pos].sort_values("par", ascending=False)
 
             for _, row in pos_df.head(40).iterrows():
-                is_priority = (
-                    pos == priority_position and row["name"] == priority_player
-                )
+                medal_rank = medal_lookup.get((pos, row["name"]))
                 border = f"4px solid {color}"
                 extra_style = ""
                 star = ""
-                if is_priority:
-                    border = "3px solid gold"
-                    extra_style = "box-shadow:0 0 8px gold;"
-                    star = "⭐ "
+                if medal_rank == 1:
+                    border = "3px solid #d4af37"
+                    extra_style = "box-shadow:0 0 8px #d4af37;"
+                    star = "🥇 "
+                elif medal_rank == 2:
+                    border = "3px solid #a8a8a8"
+                    extra_style = "box-shadow:0 0 6px #a8a8a8;"
+                    star = "🥈 "
+                elif medal_rank == 3:
+                    border = "3px solid #b08d57"
+                    extra_style = "box-shadow:0 0 6px #b08d57;"
+                    star = "🥉 "
 
                 if pos == "IDP":
                     rank_val = row.get("idp_rank")

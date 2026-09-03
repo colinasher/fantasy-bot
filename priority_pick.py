@@ -128,16 +128,36 @@ def picks_until_my_turn_snake(
 # ---------------------------------------------------------------------------
 
 
-def compute_priority_pick(pool_with_par, shares_by_round: dict, upcoming_rounds: list[int]):
+def _build_reason(pos: str, rec: dict, K: int) -> str:
+    if rec["drop_off"] > 0.5:
+        return (
+            f"Best available {pos} has {rec['par']:.1f} PAR. Historically, "
+            f"~{rec['expected_drafted_before_next_turn']:.1f} {pos}s get drafted "
+            f"in the {K} pick{'s' if K != 1 else ''} before your next turn — waiting "
+            f"would likely cost you about {rec['drop_off']:.1f} PAR at this position."
+        )
+    return (
+        f"Best available {pos} has {rec['par']:.1f} PAR, and this position isn't "
+        f"at much risk of a run before your next turn "
+        f"({rec['expected_drafted_before_next_turn']:.1f} expected)."
+    )
+
+
+def compute_priority_pick(
+    pool_with_par, shares_by_round: dict, upcoming_rounds: list[int], top_n: int = 3
+):
     """
     pool_with_par: DataFrame with 'position', 'name', 'par' columns
                    (the current undrafted pool, already PAR-scored).
     shares_by_round: output of draft_trends.compute_round_position_shares
     upcoming_rounds: rounds of each pick before your next turn
+    top_n: how many ranked recommendations to return (gold/silver/bronze = 3)
 
-    Returns None if the pool is empty, else a dict with the recommended
-    position/player, the reasoning string, and the full per-position
-    breakdown (so the UI can show runner-ups too).
+    Returns None if the pool is empty, else a dict. Top-level
+    position/player/par/priority_score/reason mirror the #1 pick for
+    backward compatibility; 'ranked' holds up to top_n entries in order
+    (rank 1 = gold, 2 = silver, 3 = bronze, ...), each with the same
+    shape plus a 'rank' field.
     """
     K = len(upcoming_rounds)
     breakdown = {}
@@ -173,31 +193,32 @@ def compute_priority_pick(pool_with_par, shares_by_round: dict, upcoming_rounds:
     if not breakdown:
         return None
 
-    top_pos = max(breakdown, key=lambda p: breakdown[p]["priority_score"])
-    rec = breakdown[top_pos]
+    ordered_positions = sorted(
+        breakdown, key=lambda p: breakdown[p]["priority_score"], reverse=True
+    )
 
-    if rec["drop_off"] > 0.5:
-        reason = (
-            f"Best available {top_pos} has {rec['par']:.1f} PAR. Historically, "
-            f"~{rec['expected_drafted_before_next_turn']:.1f} {top_pos}s get drafted "
-            f"in the {K} pick{'s' if K != 1 else ''} before your next turn — waiting "
-            f"would likely cost you about {rec['drop_off']:.1f} PAR at this position, "
-            f"more than any other spot's risk."
-        )
-    else:
-        reason = (
-            f"Best available {top_pos} has {rec['par']:.1f} PAR, the highest on the "
-            f"board right now, and this position isn't at much risk of a run before "
-            f"your next turn ({rec['expected_drafted_before_next_turn']:.1f} expected)."
-        )
+    ranked = []
+    for i, pos in enumerate(ordered_positions[:top_n], start=1):
+        rec = breakdown[pos]
+        ranked.append({
+            "rank": i,
+            "position": pos,
+            "player": rec["player"],
+            "par": rec["par"],
+            "priority_score": rec["priority_score"],
+            "picks_until_next_turn": K,
+            "reason": _build_reason(pos, rec, K),
+        })
 
+    top = ranked[0]
     return {
-        "position": top_pos,
-        "player": rec["player"],
-        "par": rec["par"],
-        "priority_score": rec["priority_score"],
+        "position": top["position"],
+        "player": top["player"],
+        "par": top["par"],
+        "priority_score": top["priority_score"],
         "picks_until_next_turn": K,
-        "reason": reason,
+        "reason": top["reason"],
+        "ranked": ranked,
         "breakdown": breakdown,
     }
 
